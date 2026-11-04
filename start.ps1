@@ -41,6 +41,7 @@ $fontMono   = New-Object System.Drawing.Font("Consolas", 10)
 $script:selectedPaths = [System.Collections.ArrayList]::new()
 $script:settings = $null
 $script:tmpShadowColor = "#000000"
+$script:cachedRatio = $null
 
 if ($args.Count -ge 1) {
     foreach ($a in $args) {
@@ -51,29 +52,77 @@ if ($args.Count -ge 1) {
 }
 
 function Get-FirstImageRatio {
+    # 只返回缓存，由 Update-ImageRatio 更新
+    if ($null -eq $script:cachedRatio) { return 1.5 }
+    return $script:cachedRatio
+}
+
+function Update-ImageRatio {
+    $script:cachedRatio = $null
     foreach ($p in $script:selectedPaths) {
+        $firstFile = $null
         if (Test-Path -LiteralPath $p -PathType Leaf) {
-            try {
-                $img = [System.Drawing.Image]::FromFile($p)
-                $r = [double]$img.Width / [double]$img.Height
-                $img.Dispose()
-                return $r
-            } catch { }
+            $firstFile = $p
         } elseif (Test-Path -LiteralPath $p -PathType Container) {
-            $first = Get-ChildItem -LiteralPath $p -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Extension -match '^\.(jpg|jpeg|png|tif|tiff)$' } |
+            $f = Get-ChildItem -LiteralPath $p -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -match '^\.(jpg|jpeg|png|tif|tiff|heic|heif)$' } |
                 Select-Object -First 1
-            if ($null -ne $first) {
-                try {
-                    $img = [System.Drawing.Image]::FromFile($first.FullName)
-                    $r = [double]$img.Width / [double]$img.Height
-                    $img.Dispose()
-                    return $r
-                } catch { }
-            }
+            if ($f) { $firstFile = $f.FullName }
         }
+        if (-not $firstFile) { continue }
+
+        # 优先用 Python 读取（与处理端完全一致：EXIF 旋转 + HEIC）
+        try {
+            $env:TMPIMG = $firstFile
+            $pyCode = @"
+import os
+try:
+    from PIL import Image, ImageOps
+    try:
+        from pillow_heif import register_heif_opener
+        register_heif_opener()
+    except Exception:
+        pass
+    img = ImageOps.exif_transpose(Image.open(os.environ['TMPIMG']))
+    print(f'{img.width},{img.height}')
+except Exception:
+    print('ERR')
+"@
+            $out = & py -3 -c $pyCode 2>$null
+            if ($out -and $out -match '^(\d+),(\d+)$') {
+                $w = [double]$Matches[1]
+                $h = [double]$Matches[2]
+                if ($h -gt 0) {
+                    $script:cachedRatio = $w / $h
+                    return
+                }
+            }
+        } catch { }
+
+        # 降级：System.Drawing 读（手动处理 EXIF Orientation）
+        try {
+            $img = [System.Drawing.Image]::FromFile($firstFile)
+            $w = [double]$img.Width
+            $h = [double]$img.Height
+            $orientation = 1
+            try {
+                foreach ($prop in $img.PropertyItems) {
+                    if ($prop.Id -eq 0x0112) {
+                        $orientation = [int]$prop.Value[0]
+                        break
+                    }
+                }
+            } catch { }
+            $img.Dispose()
+            if ($orientation -ge 5 -and $orientation -le 8) {
+                $tmp = $w; $w = $h; $h = $tmp
+            }
+            if ($h -gt 0) {
+                $script:cachedRatio = $w / $h
+                return
+            }
+        } catch { }
     }
-    return 1.5
 }
 
 # 关键修复：函数内所有 void 方法用 [void] 抑制输出，返回用 ,$path 保证单个对象
@@ -842,6 +891,7 @@ function Show-ConfigForm($s) {
         foreach ($t in $script:selectedPaths) { [void]$lstTargets.Items.Add($t) }
         $lstTargets.EndUpdate()
         $grpTarget.Text = "处理对象（$($script:selectedPaths.Count) 个，双击列表项可移除）"
+        Update-ImageRatio
         $panelPreview.Invalidate()
     }
     Update-TargetsList
@@ -1015,12 +1065,22 @@ while ($true) {
     $cmdLine = "py -3 photo_batch_tool.py --config `"$configPath`" & echo. & echo === 处理结束 === & pause"
     $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmdLine -PassThru -Wait
 
+    # -1073741510 = 0xC000013A = STATUS_CONTROL_C_EXIT（用户关闭了控制台窗口）
+    $userClosedConsole = ($proc.ExitCode -eq -1073741510) -or ($proc.ExitCode -eq 3221225786)
+
     if ($proc.ExitCode -eq 0) {
         $choice = [System.Windows.Forms.MessageBox]::Show(
             "本批处理完成！`n`n是否继续处理下一批？",
             "完成", "YesNo", "Question")
         if ($choice -eq [System.Windows.Forms.DialogResult]::No) { break }
-    } else {
+    }
+    elseif ($userClosedConsole) {
+        $choice = [System.Windows.Forms.MessageBox]::Show(
+            "处理窗口已被关闭。`n`n是否返回配置界面？",
+            "已中止", "YesNo", "Information")
+        if ($choice -eq [System.Windows.Forms.DialogResult]::No) { break }
+    }
+    else {
         $choice = [System.Windows.Forms.MessageBox]::Show(
             "处理过程中出现错误（退出码 $($proc.ExitCode)）。`n`n是否返回配置界面重试？",
             "错误", "YesNo", "Error")
