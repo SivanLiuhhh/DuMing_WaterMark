@@ -1,8 +1,6 @@
-# DuMing_WaterMark
-A photo watermark tool for adding watermarks and blur effects. 
 渡明水印工具
 
-Windows 水印工具，图形界面，双击即用。统一输出比例、模糊背景、添加 EXIF 水印。
+Windows 批量照片处理工具，图形界面，双击即用。统一输出比例、模糊背景、添加 EXIF 水印。
 功能
 
     比例：16:9 / 4:3 / 3:2 / 1:1 / 4:5 / 9:16 / 3:4 / 2:3
@@ -84,4 +82,3 @@ $fontNormal = New-Object System.Drawing.Font("Microsoft YaHei UI", 10)
 许可
 
 个人使用工具，自由修改分发。依赖 Pillow。
-
